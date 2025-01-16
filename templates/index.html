@@ -174,7 +174,7 @@
                 }
 
                 // ✅ LLM 응답을 대화창 하단에 표시
-                messageBox.innerHTML += `<div class="message bot"><strong>💡 챗봇 응답:</strong> ${JSON.stringify(data.llm_response)}</div>`;
+                messageBox.innerHTML += `<div class="message bot"><strong>💡 챗봇 응답:</strong> ${JSON.stringify(data.runnable)}</div>`;
 
             } catch (error) {
                 console.error("에러 발생:", error);

@@ -148,6 +148,12 @@ def search_and_generate_response(request: QueryRequest):
     print(f"🔍 사용자 검색어: {query}")
 
     try:
+
+        # ✅ 대화 이력 로드
+        memory_data = memory.load_memory_variables({})
+        chat_history = str(memory_data.get("chat_history", "대화 내역 없음."))
+
+
         # ✅ LLM을 통한 키워드 추출 및 임베딩 생성
         combined_keywords = extract_keywords_with_llm(query)
         print(f"✅ 추출된 키워드: {combined_keywords}")
@@ -224,8 +230,8 @@ def search_and_generate_response(request: QueryRequest):
         # ✅ LLM을 사용하여 대화 흐름을 자연스럽게 유지
         llm = ChatOpenAI(model="gpt-4o-mini-2024-07-18", api_key=API_KEY)
         response = llm.invoke([
-            SystemMessage(content=f"오너클랜판매가:가격,원본상품명:상품의 제목. 당신은 쇼핑몰에 대한 지식이 높고 사용자의 질문에 대해서 아주 친절하고 전문가인 챗봇입니다. 모든 답변은 간결하고 쉽게 답변합니다."),
-            HumanMessage(content=f"사용자 요청: {query} \n 검색된 결과:\n{json.dumps(results, ensure_ascii=False, indent=2)}\n 사용자에게 추가 질문을 만들어주세요."),
+            SystemMessage(content=f"오너클랜판매가:가격,원본상품명:상품의 제목. 당신은 쇼핑몰에 대한 지식이 높고 사용자의 질문에 대해서 아주 친절하고 전문가인 챗봇입니다. 모든 답변은 간결하고 사용자의 대화 이력을 반영하여 적절한 답변을 만들어 추가적 질문을 제공하세요."),
+            HumanMessage(content=f"사용자 요청: {query} \n 대화 이력:\n{chat_history}\n 검색된 결과:\n{json.dumps(results, ensure_ascii=False, indent=2)}\n"),
         ])
 
         # ✅ JSON 반환

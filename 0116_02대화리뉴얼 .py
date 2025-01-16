@@ -14,6 +14,8 @@ import uvicorn
 from fastapi.middleware.cors import CORSMiddleware
 from langchain.schema import SystemMessage, HumanMessage, AIMessage
 from langchain.memory import ConversationBufferMemory
+from langchain_community.chat_message_histories import RedisChatMessageHistory
+
 
 # ✅ FastAPI 인스턴스 생성
 app = FastAPI()
