@@ -117,6 +117,7 @@ def search_and_generate_response(request: QueryRequest):
     query_embedding = 임베딩.embed_query(query)
 
     # ✅ FAISS 검색 수행
+    # D: 유사도 거리 배열 (값이 작을수록 더 유사함) / I: 인덱스 배열 (가장 유사한 데이터의 위치)
     D, I = index.search(np.array([query_embedding], dtype=np.float32), k=5)
 
     # ✅ 검색 결과 JSON 변환
@@ -135,7 +136,7 @@ def search_and_generate_response(request: QueryRequest):
         }
         results.append(result_info)
 
-    combined_input = f"질문: {query}, 핵심단어: {', '.join(memoryWord)}"
+    combined_input = f"질문: {query}, 핵심단어: {','.join(memoryWord)}"
 
     # ✅ LLM을 사용하여 대화 흐름을 자연스럽게 유지
     llm = ChatOpenAI(model="gpt-4o-mini-2024-07-18", api_key=API_KEY)
