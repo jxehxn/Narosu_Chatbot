@@ -19,6 +19,7 @@ from langchain_community.chat_message_histories import ChatMessageHistory
 from langchain_core.chat_history import BaseChatMessageHistory
 from langchain_core.runnables.history import RunnableWithMessageHistory
 from langchain_community.chat_message_histories import RedisChatMessageHistory
+from langchain_core.runnables import ConfigurableFieldSpec
 
 
 # ✅ 환경 변수 로드
@@ -110,11 +111,12 @@ index = load_faiss_index(faiss_file_path)
 # ✅ 정확도 계산 함수
 def calculate_accuracies(distances):
     """
-    거리 값 리스트를 받아 정확도를 계산하여 반환합니다.
-    :param distances: FAISS에서 반환된 거리 값 리스트
+    거리 값 배열을 받아 정확도를 계산하여 반환합니다.
+    :param distances: FAISS에서 반환된 거리 값 배열
     :return: 정확도 리스트 (0.00 ~ 1.00 범위)
     """
-    return [round((1 - dist), 2) for dist in distances]
+    accuracies = np.round(1 - distances, 2)
+    return accuracies.tolist()
 
 
 
@@ -124,7 +126,7 @@ def extract_keywords_with_llm(query):
 
     # 기존 대화 이력과 함께 LLM에 전달
     response = llm.invoke([
-        SystemMessage(content="사용자의 대화 내역을 반영하여 상품 검색을 위한 핵심 키워드를 추출해주세요."),
+        SystemMessage(content="사용자의 대화 내역을 반영하여 상품 검색을 위한 핵심 키워드를 추출해주세요. 만약 단어간에 띄어쓰기가 있다고 해도 하나의 단어 일수도 있습니다. 여러방법으로 생각해서 추출해주세요."),
         HumanMessage(content=f"질문: {query} \n ")
     ])
 
@@ -132,6 +134,15 @@ def extract_keywords_with_llm(query):
     keywords = [keyword.strip() for keyword in response.content.split(",")]
     combined_keywords = ", ".join(keywords)
     return combined_keywords
+
+store = {}  # 빈 딕셔너리를 초기화합니다.
+
+def get_session_history(session_id: str) -> BaseChatMessageHistory:
+    # 세션 ID에 해당하는 대화 기록이 저장소에 없으면 새로운 ChatMessageHistory를 생성합니다.
+    if session_id not in store:
+        store[session_id] = ChatMessageHistory()
+    # 세션 ID에 해당하는 대화 기록을 반환합니다.
+    return store[session_id]
 
 
 
@@ -144,80 +155,104 @@ async def serve_home(request: Request):
 @app.post("/chatbot")
 def search_and_generate_response(request: QueryRequest):
     query = request.query
+    session_id = "redis123"  # 고정된 세션 ID
     print(f"🔍 사용자 검색어: {query}")
 
-    
     try:
         # ✅ LLM을 통한 키워드 추출 및 임베딩 생성
         combined_keywords = extract_keywords_with_llm(query)
         print(f"✅ 추출된 키워드: {combined_keywords}")
 
         _, data = load_excel_to_texts("db/ownerclan_narosu_오너클랜상품리스트_OWNERCLAN_250102 필요한 내용만.xlsx")
-        
+
         # ✅ OpenAI 임베딩 생성
         임베딩 = OpenAIEmbeddings(model="text-embedding-ada-002", openai_api_key=API_KEY)
         query_embedding = 임베딩.embed_query(combined_keywords)
         query_embedding = np.array([query_embedding], dtype=np.float32)
         faiss.normalize_L2(query_embedding)
-        
+
         # ✅ FAISS 검색 수행
         D, I = index.search(query_embedding, k=5)
 
         # ✅ FAISS 검색 결과 검사
-        if I is None or len(I) == 0 or not hasattr(I, "__iter__"):
+        if I is None or I.size == 0:
             return {
                 "query": query,
                 "results": [],
                 "message": "검색 결과가 없습니다. 다른 키워드를 입력하세요!"
             }
-        
-        # ✅ 거리 값 기반으로 정확도 계산
-        accuracies = calculate_accuracies(D)
 
         # ✅ 검색 결과 JSON 변환
         results = []
-        for idx, accuracy in zip(I, accuracies):
-            if idx >= len(data):
-                continue
-            result_row = data.iloc[idx]
-            result_info = {
-                "상품코드": str(result_row["상품코드"]),
-                "원본상품명": result_row["원본상품명"],
-                "오너클랜판매가": convert_to_serializable(result_row["오너클랜판매가"]),
-                "배송비": convert_to_serializable(result_row["배송비"]),
-                "이미지중": result_row["이미지중"],
-                "원산지": result_row["원산지"],
-                "정확도": accuracy  # ✅ 정확도 추가
-            }
-            results.append(result_info)
-        
+        for idx_list in I:  # 2차원 배열 처리
+            for idx in idx_list:
+                if idx >= len(data):  # 잘못된 인덱스 방지
+                    continue
+                result_row = data.iloc[idx]
+                result_info = {
+                    "상품코드": str(result_row["상품코드"]),
+                    "원본상품명": result_row["원본상품명"],
+                    "오너클랜판매가": convert_to_serializable(result_row["오너클랜판매가"]),
+                    "배송비": convert_to_serializable(result_row["배송비"]),
+                    "이미지중": result_row["이미지중"],
+                    "원산지": result_row["원산지"]
+                }
+                results.append(result_info)
+
         # ✅ ChatPromptTemplate 및 RunnableWithMessageHistory 생성
         llm = ChatOpenAI(model="gpt-4o-mini", openai_api_key=API_KEY)
         prompt = ChatPromptTemplate.from_messages([
-            ("system", "당신은 친절한 쇼핑 챗봇입니다. 사용자 대화를 기억하고 친절하게 회장님 모시듯 응답하세요. 그리고 상품을 찾을 수 있게 계속해서 질문을 하세요. 30자 이내로 응답하세요."),
+            ("system", "당신은 친절한 쇼핑몰 챗봇입니다. 사용자 대화를 기억하고 친절하게 회장님처럼 모시듯 응답하세요. 그리고 상품을 찾을 수 있게 계속해서 질문해서 사용자가 원하는 상품을 좁혀 나가세요. 30자 이내로 응답하세요."),
             MessagesPlaceholder(variable_name="history"),
-            ("human", "{input}")
+            ("human", query)
         ])
+        
         runnable = prompt | llm
 
         with_message_history = RunnableWithMessageHistory(
-            runnable,  # 실행 가능한 객체
-            get_message_history,  # 메시지 기록을 가져오는 함수
-            input_messages_key="input",  # 입력 메시지의 키
-            history_messages_key="history",  # 기록 메시지의 키
+            runnable,
+            get_session_history,
+            output_messages_key="output_messages",
+        )
+                 # ✅ LLM 실행 및 메시지 기록 업데이트
+        response = with_message_history.invoke(
+            {"input": query},
+            config={"configurable": {"session_id": session_id}}
         )
 
+
+
+         # ✅ 메시지 기록을 JSON으로 변환
+        session_history = get_session_history(session_id)
+
+        message_history = [
+            {"type": type(msg).__name__, "content": msg.content if hasattr(msg, "content") else str(msg)}
+            for msg in session_history.messages
+        ]
+
+
+
+         # ✅ 출력 테스트트
+        print("***respones:"+str(response))
+
+        # # 'AIMessage'인지 확인하고 'content' 속성을 추출
+        # if isinstance(response, AIMessage):
+        #     response_content = response.content
+        # else:
+        #     response_content = str(response)
+        
         # ✅ JSON 반환
         return {
             "query": query,
             "results": results,
-            "정확도" : accuracy,
-            "runnable" : runnable
+            "response": response.content,
+            "message_history": message_history
         }
 
     except Exception as e:
         print(f"❌ 오류 발생: {e}")
         raise HTTPException(status_code=500, detail=str(e))
+
 
 
 # ✅ FastAPI 서버 실행 (포트 고정: 5050)
