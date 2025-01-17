@@ -136,7 +136,7 @@ def extract_keywords_with_llm(query):
 
     # 기존 대화 이력과 함께 LLM에 전달
     response = llm.invoke([
-        SystemMessage(content="사용자의 대화 내역을 반영하여 상품 검색을 위한 정말로 핵심 키워드만 추출해주세요. 만약 단어 간에 띄어쓰기가 있다면 하나의 단어 일수도 있습니다 띄어쓰기가 있다면 단어끼리 붙여서도 문장을 분석해보세요요. 여러방법으로 생각해서 추출해주세요."),
+        SystemMessage(content="사용자의 대화 내역을 반영하여 상품 검색을 위한 정말로 핵심 키워드를 추출해주세요. 만약 단어 간에 띄어쓰기가 있다면 하나의 단어 일수도 있습니다 띄어쓰기가 있다면 단어끼리 붙여서도 문장을 분석해보세요요. 여러방법으로 생각해서 추출해주세요."),
         HumanMessage(content=f"질문: {query} \n ")
     ])
 
@@ -170,10 +170,21 @@ def search_and_generate_response(request: QueryRequest):
 
     try:
         # ✅ Redis 메시지 기록 관리
-        session_history = get_session_history(session_id)
-
+        session_history = get_message_history(session_id)
          # ✅ 기존 대화 내역 확인
-        print(f"🔍 Redis 메시지 기록: {session_history.messages}")
+        print(f"🔍 Redis 메시지 기록 (초기 상태): {session_history.messages}")
+
+         # ✅ Redis에 강제 메시지 추가 테스트
+        session_history.add_message(HumanMessage(content=query))
+        print(f"✅ Redis에 강제 메시지 추가 후 상태: {session_history.messages}")
+
+        # ✅ 이전 대화 내용 누적
+        combined_query = " ".join([
+            msg.content for msg in session_history.messages if isinstance(msg, HumanMessage)
+        ] + [query])
+        print(f"✅ 누적된 대화 내용: {combined_query}")
+
+
 
         # ✅ LLM을 통한 키워드 추출 및 임베딩 생성
         combined_keywords = extract_keywords_with_llm(query)
@@ -218,7 +229,7 @@ def search_and_generate_response(request: QueryRequest):
         # ✅ ChatPromptTemplate 및 RunnableWithMessageHistory 생성
         llm = ChatOpenAI(model="gpt-4o-mini", openai_api_key=API_KEY)
         prompt = ChatPromptTemplate.from_messages([
-            ("system", "당신은 친절한 쇼핑몰 챗봇입니다. 사용자 대화를 기억하고 친절하게 회장님처럼 모시듯 응답하는데 진짜로 하나의 사람처럼 답변변하세요. 그리고 상품을 찾을 수 있게 계속해서 질문해서 사용자가 원하는 상품을 좁혀 나가세요. 30자 이내로 응답하세요."),
+            ("system", "당신은 친절한 쇼핑몰 챗봇입니다. 오너클랜판매가 라는 속성은 가격을 나타냅니다. 사용자 문장을 이해하고 친절하게 회장님처럼 모시듯 응답하는데 진짜로 하나의 사람처럼 답변변하세요. 그리고 상품을 찾을 수 있게 계속해서 질문해서 사용자가 원하는 상품을 좁혀 나가세요. 30자 이내로 응답하세요."),
             MessagesPlaceholder(variable_name="history"),
             ("human", query)
         ])
@@ -246,16 +257,10 @@ def search_and_generate_response(request: QueryRequest):
         ]
 
 
+        # ✅ 출력 디버깅
+        print("*** Response:", response)
+        print("*** Message History:", message_history)
 
-         # ✅ 출력 테스트트
-        print("***respones:"+str(response))
-
-        # # 'AIMessage'인지 확인하고 'content' 속성을 추출
-        # if isinstance(response, AIMessage):
-        #     response_content = response.content
-        # else:
-        #     response_content = str(response)
-        
         # ✅ JSON 반환
         return {
             "query": query,
@@ -267,8 +272,6 @@ def search_and_generate_response(request: QueryRequest):
     except Exception as e:
         print(f"❌ 오류 발생: {e}")
         raise HTTPException(status_code=500, detail=str(e))
-
-
 
 # ✅ FastAPI 서버 실행 (포트 고정: 5050)
 if __name__ == "__main__":
