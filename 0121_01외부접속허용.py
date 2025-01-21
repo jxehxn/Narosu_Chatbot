@@ -21,13 +21,19 @@ from langchain_core.runnables.history import RunnableWithMessageHistory
 from langchain_community.chat_message_histories import RedisChatMessageHistory
 from langchain_core.runnables import ConfigurableFieldSpec
 import redis
+import requests
 
 
 # ✅ 환경 변수 로드
 load_dotenv()
 API_KEY = os.getenv('OPENAI_API_KEY')
 REDIS_URL = "redis://localhost:6379/0"
+VERIFY_TOKEN = os.getenv('VERIFY_TOKEN')
+PAGE_ACCESS_TOKEN = os.getenv('PAGE_ACCESS_TOKEN')
 
+
+def get_redis():
+    return redis.Redis.from_url(REDIS_URL)
 
 # ✅ FastAPI 인스턴스 생성
 app = FastAPI()
@@ -56,12 +62,12 @@ def get_message_history(session_id: str) -> RedisChatMessageHistory:
         print(f"❌ Redis 연결 오류: {e}")
         raise HTTPException(status_code=500, detail="Redis 연결에 문제가 발생했습니다.")
 
-# ✅ FAISS 인덱스 파일 경로 설정
-faiss_file_path = f"faiss_index_{datetime.now().strftime('%Y%m%d')}.faiss"
-
-# ✅ POST 요청을 위한 데이터 모델 정의
+# 요청 모델
 class QueryRequest(BaseModel):
     query: str
+
+# ✅ FAISS 인덱스 파일 경로 설정
+faiss_file_path = f"faiss_index_{datetime.now().strftime('%Y%m%d')}.faiss"
 
 # ✅ JSON 직렬화를 위한 int 변환 함수
 def convert_to_serializable(obj):
@@ -143,6 +149,83 @@ def get_session_history(session_id: str) -> BaseChatMessageHistory:
     # 세션 ID에 해당하는 대화 기록을 반환합니다.
     return store[session_id]
 
+def clear_message_history(session_id: str):
+    """
+    Redis에 저장된 특정 세션의 대화 기록을 초기화합니다.
+    """
+    try:
+        history = RedisChatMessageHistory(session_id=session_id, url=REDIS_URL)
+        history.clear()
+        print(f"✅ 세션 {session_id}의 대화 기록이 초기화되었습니다.")
+    except Exception as e:
+        print(f"❌ Redis 초기화 오류: {e}")
+        raise HTTPException(status_code=500, detail="대화 기록 초기화 중 오류가 발생했습니다.")
+
+
+
+
+
+
+@app.get("/webhook")
+async def verify_webhook(request: Request):
+    try:
+        mode = request.query_params.get("hub.mode")
+        token = request.query_params.get("hub.verify_token")
+        challenge = request.query_params.get("hub.challenge")
+        
+        if mode == "subscribe" and token == VERIFY_TOKEN:
+            print("✅ 웹훅 인증 성공")
+            return int(challenge)
+        else:
+            print("❌ 웹훅 인증 실패")
+            return {"status": "error", "message": "Invalid token"}
+    except Exception as e:
+        print(f"❌ 인증 처리 오류: {e}")
+        return {"status": "error", "message": str(e)}
+    
+@app.post("/webhook")
+async def handle_webhook(request: Request):
+    try:
+        data = await request.json()
+        print(f"📬 웹훅 데이터 수신: {data}")
+
+        # 메시지 처리 로직
+        for entry in data.get("entry", []):
+            for message_event in entry.get("messaging", []):
+                sender_id = message_event["sender"]["id"]
+                if "message" in message_event:
+                    # 사용자가 보낸 메시지
+                    user_message = message_event["message"]["text"]
+                    print(f"👤 {sender_id}가 보낸 메시지: {user_message}")
+                    # 응답 메시지 전송
+                    await send_message(sender_id, "메시지를 잘 받았습니다!")
+        return {"status": "success"}
+    except Exception as e:
+        print(f"❌ 웹훅 처리 오류: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+PAGE_ACCESS_TOKEN = os.getenv("PAGE_ACCESS_TOKEN")  # 페이스북 페이지 액세스 토큰
+
+async def send_message(recipient_id, message_text):
+    headers = {
+        "Content-Type": "application/json",
+    }
+    payload = {
+        "recipient": {"id": recipient_id},
+        "message": {"text": message_text},
+    }
+    params = {
+        "access_token": PAGE_ACCESS_TOKEN,
+    }
+    response = requests.post(
+        "https://graph.facebook.com/v11.0/me/messages",
+        headers=headers,
+        params=params,
+        json=payload,
+    )
+    if response.status_code != 200:
+        print(f"❌ 메시지 전송 오류: {response.status_code} - {response.text}")
+
 
 
 # ✅ 루트 경로 - HTML 페이지 렌더링
@@ -155,6 +238,17 @@ async def serve_home(request: Request):
 def search_and_generate_response(request: QueryRequest):
     query = request.query
     session_id = "redis123"  # 고정된 세션 ID
+
+
+    reset_request = request.query.lower() == "reset"  # 'reset' 명령으로 초기화
+    if reset_request:
+        clear_message_history(session_id)
+        return {
+            "message": f"세션 {session_id}의 대화 기록이 초기화되었습니다."
+        }
+
+
+
     print(f"🔍 사용자 검색어: {query}")
 
     try:
@@ -163,19 +257,20 @@ def search_and_generate_response(request: QueryRequest):
         # ✅ 기존 대화 내역 확인
         print(f"🔍 Redis 메시지 기록 (초기 상태): {session_history.messages}")
 
-        # ✅ 이전 대화 내용 누적
-        combined_query = " ".join([
+        # ✅ 기존 대화 내역 확인
+        previous_queries = [
             msg.content for msg in session_history.messages if isinstance(msg, HumanMessage)
-        ] + [query])
-        print(f"✅ 누적된 대화 내용: {combined_query}")
-
-        # ✅ Redis에 강제 메시지 추가 테스트
-        session_history.add_message(HumanMessage(content=query))
-        print(f"✅ Redis에 강제 메시지 추가 후 상태: {session_history.messages}")
+        ]
+        print(f"🔍 Redis 메시지 기록: {previous_queries}")
 
         # ✅ LLM을 통한 키워드 추출 및 임베딩 생성
-        combined_keywords = extract_keywords_with_llm(query)
-        print(f"✅ 추출된 키워드: {combined_keywords}")
+        combined_query = " ".join(previous_queries + [query])
+        combined_keywords = extract_keywords_with_llm(combined_query)
+        print(f"✅ 생성된 검색 키워드: {combined_keywords}")
+
+        # ✅ Redis에 사용자 입력 추가
+        session_history.add_message(HumanMessage(content=query))
+        print(f"�� Redis 메시지 기록 (변경된 상태): {session_history.messages}")
 
         _, data = load_excel_to_texts("db/ownerclan_narosu_오너클랜상품리스트_OWNERCLAN_250102 필요한 내용만.xlsx")
 
@@ -193,8 +288,14 @@ def search_and_generate_response(request: QueryRequest):
             return {
                 "query": query,
                 "results": [],
-                "message": "검색 결과가 없습니다. 다른 키워드를 입력하세요!"
+                "message": "검색 결과가 없습니다. 다른 키워드를 입력하세요!",
+                "message_history": [
+                    {"type": type(msg).__name__, "content": msg.content if hasattr(msg, "content") else str(msg)}
+                    for msg in session_history.messages
+                ],
             }
+
+
 
         # ✅ 검색 결과 JSON 변환
         results = []
@@ -205,19 +306,44 @@ def search_and_generate_response(request: QueryRequest):
                 result_row = data.iloc[idx]
                 result_info = {
                     "상품코드": str(result_row["상품코드"]),
-                    "원본상품명": result_row["원본상품명"],
-                    "오너클랜판매가": convert_to_serializable(result_row["오너클랜판매가"]),
+                    "제목": result_row["원본상품명"],
+                    "가격": convert_to_serializable(result_row["오너클랜판매가"]),
                     "배송비": convert_to_serializable(result_row["배송비"]),
-                    "이미지중": result_row["이미지중"],
+                    "이미지": result_row["이미지중"],
                     "원산지": result_row["원산지"]
                 }
                 results.append(result_info)
 
+        # ✅ results를 텍스트로 변환
+        if results:
+            results_text = "\n".join(
+                [
+                    f"상품코드: {item['상품코드']}, 제목: {item['제목']}, 가격: {item['가격']}원, "
+                    f"배송비: {item['배송비']}원, 원산지: {item['원산지']}, 이미지: {item['이미지']}"
+                    for item in results
+                ]
+            )
+        else:
+            results_text = "검색 결과가 없습니다."
+                
+        message_history=[]
+        
         # ✅ ChatPromptTemplate 및 RunnableWithMessageHistory 생성
         llm = ChatOpenAI(model="gpt-4o-mini", openai_api_key=API_KEY)
         prompt = ChatPromptTemplate.from_messages([
-            ("system", "당신은 친절한 쇼핑몰 챗봇입니다.  사용자 문장을 이해하여 이전에 내용을 기억해서 상품을 이어서 찾아주며 친절하게 회장님처럼 모시듯 응답하는데 진짜로 하나의 사람처럼 답변하세요. 그리고 상품을 찾을 수 있게 계속해서 질문해서 사용자가 원하는 상품을 좁혀 나가세요. 30자 이내로 응답하세요."),
-            MessagesPlaceholder(variable_name="history"),
+            ("system", f"""항상 message_history의 대화이력을 보면서 대화의 문맥을 이해합니다. 당신은 쇼핑몰 챗봇으로, 친절하고 인간적인 대화를 통해 고객의 쇼핑 경험을 돕는 역할을 합니다. 아래는 최근 검색된 상품 목록입니다.
+            목표: 사용자의 요구를 명확히 이해하고, 이전 대화의 맥락을 기억해 자연스럽게 이어지는 추천을 제공합니다.
+            작동 방식:
+            이전 대화 내용을 기반으로 적합한 상품을 연결합니다.
+            이건 대화 이력 문장을 보고 문맥을 이해하며, 사용자가 무슨 내용을 작성하고 상품을 찾는지 집중적으로 답변을 작성합니다.
+            스타일: 따뜻하고 공감하며, 마치 실제 쇼핑 도우미처럼 친절하고 자연스럽게 응답합니다.
+            대화 전략:
+            사용자가 원하는 상품을 구체화하기 위해 적절한 후속 질문을 합니다.
+            대화의 흐름이 끊기지 않도록 부드럽게 이어갑니다.
+            목표는 단순한 정보 제공이 아닌, 고객이 필요한 상품을 정확히 찾을 수 있도록 돕는 데 중점을 둡니다. 당신은 이를 통해 고객이 편안하고 만족스러운 쇼핑 경험을 누릴 수 있도록 최선을 다해야 합니다."""),
+            MessagesPlaceholder(variable_name="message_history"),
+            ("system", f"다음은 대화이력입니다 : \n{message_history}"),
+            ("system", f"다음은 상품결과입니다 : \n{results_text}"),
             ("human", query)
         ])
         
@@ -227,14 +353,19 @@ def search_and_generate_response(request: QueryRequest):
             runnable,
             get_session_history,
             input_messages_key="input",  # 입력 메시지의 키
-            history_messages_key="history",
+            history_messages_key="message_history",
         )
-                 # ✅ LLM 실행 및 메시지 기록 업데이트
+
+        
+
+        # ✅ LLM 실행 및 메시지 기록 업데이트
         response = with_message_history.invoke(
             {"input": query},
             config={"configurable": {"session_id": session_id}}
         )
 
+        # ✅ Redis에 AI 응답 추가
+        session_history.add_message(AIMessage(content=response.content))
 
         # ✅ 메시지 기록을 Redis에서 가져오기
         session_history = get_message_history(session_id)
