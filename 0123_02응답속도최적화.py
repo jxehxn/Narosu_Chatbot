@@ -156,6 +156,8 @@ index = load_faiss_index(faiss_file_path)
 
 # ✅ LLM을 이용한 키워드 추출 및 대화 이력 반영
 def extract_keywords_with_llm(query):
+    redis_start = time.time()
+
     llm = ChatOpenAI(model="gpt-4o-mini", openai_api_key=API_KEY)
 
     # 기존 대화 이력과 함께 LLM에 전달
@@ -167,6 +169,9 @@ def extract_keywords_with_llm(query):
     # 키워드 업데이트
     keywords = [keyword.strip() for keyword in response.content.split(",")]
     combined_keywords = ", ".join(keywords)
+    redis_time = time.time() - redis_start
+    logger.info(f"📊 LLM을 이용한 키워드 추출 시간간: {redis_time:.4f} 초")
+
     return combined_keywords
 
 store = {}  # 빈 딕셔너리를 초기화합니다.
@@ -218,12 +223,17 @@ async def verify_webhook(request: Request):
     
 @app.post("/webhook")
 async def handle_webhook(request: Request):
-    try:
-        data = await request.json()
-        # print(f"📬 웹훅 데이터 수신: {json.dumps(data, indent=2, ensure_ascii=False)}")
-        # print(f"📬 웹훅 데이터 수신2: {data}")
+    start_time = time.time()
 
-        # 메시지 이벤트 처리
+    try:
+        # Step 1: 요청 데이터 로드
+        data = await request.json()
+        parse_time = time.time() - start_time
+        logger.info(f"📊 [Parse Time]: {parse_time:.4f} 초")
+
+        # Step 2: 메시지 처리
+        process_start = time.time()
+
         if data.get("field") == "messages":  # field 값이 'messages'인지 확인
             value = data.get("value", {})  # value 필드 가져오기
 
@@ -236,8 +246,12 @@ async def handle_webhook(request: Request):
             # print(f"유저메세지 : {user_message}")
 
             if sender_id and user_message:
-                # ✅ 챗봇 응답 생성
+                # Step 3: search_and_generate_response2 호출
+                search_start = time.time()
                 bot_response = search_and_generate_response2(user_message, session_id=sender_id)
+                search_time = time.time() - search_start
+                logger.info(f"📊 [Step 3] search_and_generate_response2 호출 시간: {search_time:.4f} 초")
+
 
                 # ✅ 사용자에게 응답 전송
                 if isinstance(bot_response, dict) and "response" in bot_response:
@@ -247,9 +261,12 @@ async def handle_webhook(request: Request):
 
                 # # 페이스북 사용자에게 메시지 전송
                 # send_message(sender_id, response_text)
-                print(f"🤖 챗봇 응답: {response_text}")
+                # print(f"🤖 챗봇 응답: {response_text}")
 
-        return response_text
+        process_time = time.time() - process_start
+        logger.info(f"📊 [Processing Time 메시지 처리 전체 시간]: {process_time:.4f} 초")
+
+        return {"status": "success", "response": response_text}
     except Exception as e:
         print(f"❌ 웹훅 처리 오류: {e}")
         raise HTTPException(status_code=500, detail=str(e))
@@ -268,8 +285,12 @@ def search_and_generate_response2(request: Union[QueryRequest, str], session_id:
     print(f"🔍 사용자 검색어: {query}")
 
     try:
-        # ✅ Redis 메시지 기록 관리
+        # Step 1: Redis 메시지 기록 관리
+        redis_start = time.time()
         session_history = get_message_history(session_id)
+        redis_time = time.time() - redis_start
+        logger.info(f"📊 [Step 1] Redis 메시지 기록 관리 시간: {redis_time:.4f} 초")
+
         # ✅ 기존 대화 내역 확인
         print(f"🔍 Redis 메시지 기록 (초기 상태): {session_history.messages}")
 
@@ -279,10 +300,16 @@ def search_and_generate_response2(request: Union[QueryRequest, str], session_id:
         ]
         print(f"🔍 Redis 메시지 기록: {previous_queries}")
 
+
+        # Step 2: LLM 키워드 추출
+        llm_start = time.time()
+
         # ✅ LLM을 통한 키워드 추출 및 임베딩 생성
         combined_query = " ".join(previous_queries + [query])
         combined_keywords = extract_keywords_with_llm(combined_query)
         print(f"✅ 생성된 검색 키워드: {combined_keywords}")
+        llm_time = time.time() - llm_start
+        logger.info(f"📊 [Step 2] LLM 키워드 추출 시간: {llm_time:.4f} 초")
 
         # ✅ Redis에 사용자 입력 추가
         session_history.add_message(HumanMessage(content=query))
@@ -291,15 +318,23 @@ def search_and_generate_response2(request: Union[QueryRequest, str], session_id:
         _, data = load_excel_to_texts("db/ownerclan_narosu_오너클랜상품리스트_OWNERCLAN_250102 필요한 내용만.xlsx")
 
         # ✅ OpenAI 임베딩 생성
+        embedding_start = time.time()
         임베딩 = OpenAIEmbeddings(model="text-embedding-ada-002", openai_api_key=API_KEY)
         query_embedding = 임베딩.embed_query(combined_keywords)
         query_embedding = np.array([query_embedding], dtype=np.float32)
         faiss.normalize_L2(query_embedding)
+        embedding_time = time.time() - embedding_start
+        logger.info(f"📊 [Step 3] OpenAI 임베딩 생성 시간: {embedding_time:.4f} 초")
+
 
         # ✅ FAISS 검색 수행
+        faiss_start = time.time()
         D, I = index.search(query_embedding, k=5)
+        faiss_time = time.time() - faiss_start
+        logger.info(f"📊 [Step 4] FAISS 검색 시간: {faiss_time:.4f} 초")
 
         # ✅ FAISS 검색 결과 검사
+        results_processing_start = time.time()       
         if I is None or I.size == 0:
             return {
                 "query": query,
@@ -330,6 +365,10 @@ def search_and_generate_response2(request: Union[QueryRequest, str], session_id:
                 }
                 results.append(result_info)
 
+        results_processing_time = time.time() - results_processing_start
+        logger.info(f"📊 [Step 5] 검색 결과 처리 시간: {results_processing_time:.4f} 초")
+
+
         # ✅ results를 텍스트로 변환
         if results:
             results_text = "\n".join(
@@ -343,23 +382,20 @@ def search_and_generate_response2(request: Union[QueryRequest, str], session_id:
             results_text = "검색 결과가 없습니다."
                 
         message_history=[]
-        
+
+        start_response = time.time()    
         # ✅ ChatPromptTemplate 및 RunnableWithMessageHistory 생성
         llm = ChatOpenAI(model="gpt-4o-mini", openai_api_key=API_KEY)
         prompt = ChatPromptTemplate.from_messages([
-            ("system", f"""항상 message_history의 대화이력을 보면서 대화의 문맥을 이해합니다. 당신은 쇼핑몰 챗봇으로, 친절하고 인간적인 대화를 통해 고객의 쇼핑 경험을 돕는 역할을 합니다. 아래는 최근 검색된 상품 목록입니다.
-            목표: 사용자의 요구를 명확히 이해하고, 이전 대화의 맥락을 기억해 자연스럽게 이어지는 추천을 제공합니다.
-            작동 방식:
-            이전 대화 내용을 기반으로 적합한 상품을 연결합니다.
-            이건 대화 이력 문장을 보고 문맥을 이해하며, 사용자가 무슨 내용을 작성하고 상품을 찾는지 집중적으로 답변을 작성합니다.
-            스타일: 따뜻하고 공감하며, 마치 실제 쇼핑 도우미처럼 친절하고 자연스럽게 응답합니다.
-            대화 전략:
-            사용자가 원하는 상품을 구체화하기 위해 적절한 후속 질문을 합니다.
-            대화의 흐름이 끊기지 않도록 부드럽게 이어갑니다.
-            목표는 단순한 정보 제공이 아닌, 고객이 필요한 상품을 정확히 찾을 수 있도록 돕는 데 중점을 둡니다. 당신은 이를 통해 고객이 편안하고 만족스러운 쇼핑 경험을 누릴 수 있도록 최선을 다해야 합니다."""),
+            ("system", f"""당신은 쇼핑몰 챗봇으로, 친절하고 인간적인 대화를 통해 고객의 쇼핑 경험을 돕습니다.
+                            목표: 사용자의 요구를 이해하고 대화의 맥락을 반영하여 적합한 상품을 추천합니다.
+                            작동 방식:대화 이력을 참고해 문맥을 파악하고 사용자의 요청에 맞는 상품을 연결합니다.
+                            필요한 경우 후속 질문으로 사용자의 요구를 구체화합니다.
+                            대화 전략:자연스럽고 공감 있게 대화를 이어가며 사용자가 원하는 상품을 정확히 찾을 수 있도록 돕습니다.
+                            고객이 편안한 쇼핑 경험을 누릴 수 있도록 최선을 다합니다."""),
             MessagesPlaceholder(variable_name="message_history"),
-            ("system", f"다음은 대화이력입니다 : \n{session_history.messages}"),
-            ("system", f"다음은 상품결과입니다 : \n{results_text}"),
+            # ("system", f"다음은 대화이력입니다 : \n{session_history.messages}"),
+            # ("system", f"다음은 상품결과입니다 : \n{results_text}"),
             ("human", query)
         ])
         
@@ -379,6 +415,9 @@ def search_and_generate_response2(request: Union[QueryRequest, str], session_id:
             {"input": query},
             config={"configurable": {"session_id": session_id}}
         )
+
+        response_time = time.time() - start_response
+        print(f"🔍 응답 생성 시간: {response_time:.4f} 초")
 
         # ✅ Redis에 AI 응답 추가
         session_history.add_message(AIMessage(content=response.content))
@@ -402,6 +441,10 @@ def search_and_generate_response2(request: Union[QueryRequest, str], session_id:
             "response": response.content,
             "message_history": message_history
         }
+    
+        # 전체 처리 시간 로깅
+        total_time = time.time() - start_time
+        logger.info(f"📊 [Total Time] 전체 search_and_generate_response2 처리 시간: {total_time:.4f} 초")
 
     except Exception as e:
         print(f"❌ 오류 발생: {e}")
