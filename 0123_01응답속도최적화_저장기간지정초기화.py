@@ -431,7 +431,7 @@ def send_message(recipient_id: str, message_text: str):
     """
     Facebook Send API를 사용하여 사용자에게 메시지를 전송합니다.
     """
-    url = "https://graph.facebook.com/v21.0/me/messages"
+    url = "https://graph.facebook.com/v22.0/me/messages"
     headers = {"Content-Type": "application/json"}
     payload = {
         "recipient": {"id": recipient_id},
