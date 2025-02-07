@@ -51,7 +51,7 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("response_time_logger")
 
 # ✅ FAISS 인덱스 파일 경로 설정
-faiss_file_path = f"faiss_index_01M.faiss"
+faiss_file_path = f"faiss_index_02M.faiss"
 
 def get_redis():
     return redis.Redis.from_url(REDIS_URL)
